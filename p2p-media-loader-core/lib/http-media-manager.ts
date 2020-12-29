@@ -19,13 +19,13 @@ export class HttpMediaManager extends STEEmitter<
         readonly settings: {
             // 尝试失败后尝试通过HTTP再次加载段之前的超时时间（以毫秒为单位）
             httpFailedSegmentTimeout: number;
-            // 使用HTTP进行加载的范围
+            // HTTP Range头，用于设置字节下载范围
             httpUseRanges: boolean;
-            // 片段验证
+            // 分片验证器
             segmentValidator?: SegmentValidatorCallback;
-            // xhr请求回调
+            // 创建XHR时对外回调
             xhrSetup?: XhrSetupCallback;
-            // 细分网址函数
+            // 分片URL构造器
             segmentUrlBuilder?: SegmentUrlBuilder;
         }
     ) {
@@ -33,93 +33,102 @@ export class HttpMediaManager extends STEEmitter<
     }
 
     public download(segment: Segment, downloadedPieces?: ArrayBuffer[]): void {
-        // 判断当前片段是否在下载
+        // 判断当前分片是否在下载
         // this.isDownloading(segment);
         if (this.xhrRequests.has(segment.id)) return;
 
-        // 清除失败的片段
-        // this.cleanTimedOutFailedSegments();
-        const now = performance.now();
-        const candidates: string[] = [];
-        this.failedSegments.forEach((time, id) => {
-            if (time < now) candidates.push(id);
-        });
-        candidates.forEach((id) => this.failedSegments.delete(id));
+        // 清除失败的分片
+        this.cleanTimedOutFailedSegments();
+        // const now = performance.now();
+        // const candidates: string[] = [];
+        // this.failedSegments.forEach((time, id) => {
+        //     if (time < now) candidates.push(id);
+        // });
+        // candidates.forEach((id) => this.failedSegments.delete(id));
 
-        // 获取片段Url，可使用自定义的片段构建函数
+        // 获取分片Url，可使用自定义的片段构建函数
         const segmentUrl = this.settings.segmentUrlBuilder
             ? this.settings.segmentUrlBuilder(segment)
             : segment.url;
         segment.requestUrl = segmentUrl;
 
-        // 请求片段Url
+        // 创建XHR请求
         const xhr = new XMLHttpRequest();
         xhr.open("GET", segmentUrl, true);
         xhr.responseType = "arraybuffer";
 
-        // 可选，设置Range请求头，用于获取指定范围的数据
+        // 可选，设置Range请求头，用于获取指定范围的分片数据
         // 能正常响应时返回206，不能处理Range时返回整个资源和200状态码
         if (segment.range) {
             xhr.setRequestHeader("Range", segment.range);
             downloadedPieces = undefined; // TODO: process downloadedPieces for segments with range headers too
         } else if (
-            // 如果已下载的数据不为空，且要求进行指定数据量的切片
+            // 如果已下载的分片数据不为空，且要求进行指定数据量的切片
             downloadedPieces !== undefined &&
             this.settings.httpUseRanges
         ) {
-            // 计算已下载的数据字节数
+            // 计算已下载的分片数据字节数
             let bytesDownloaded = 0;
             for (const piece of downloadedPieces) {
                 bytesDownloaded += piece.byteLength;
             }
-            // 设置Range头
+            // 设置HTTP Range头
             xhr.setRequestHeader("Range", `bytes=${bytesDownloaded}-`);
         } else {
             // 如果没有要求进行数据切片
             downloadedPieces = undefined;
         }
 
-        // 发起xhr请求
+        // 设置xhr事件监听
         this.setupXhrEvents(xhr, segment, downloadedPieces);
 
         // 返回当前创建的xhr给外部
         if (this.settings.xhrSetup) this.settings.xhrSetup(xhr, segmentUrl);
 
+        // 将当前分片ID放入请求队列中
         this.xhrRequests.set(segment.id, { xhr, segment });
+
+        // 发起xhr请求
         xhr.send();
     }
 
+    // 中止数据下载
     public abort(segment: Segment): void {
         const request = this.xhrRequests.get(segment.id);
 
-        if (request) {
-            request.xhr.abort();
-            this.xhrRequests.delete(segment.id);
-        }
+        if (!request) return;
+        request.xhr.abort();
+        this.xhrRequests.delete(segment.id);
     }
 
+    // 判断分片是否在下载中
     public isDownloading(segment: Segment): boolean {
         return this.xhrRequests.has(segment.id);
     }
 
+    // 判断分片下载是否失败（超时）
     public isFailed(segment: Segment): boolean {
         const time = this.failedSegments.get(segment.id);
         return time !== undefined && time > this.now();
     }
 
+    // 获取当前活跃的分片下载
     public getActiveDownloads(): ReadonlyMap<string, { segment: Segment }> {
         return this.xhrRequests;
     }
 
+    // 获取当前活跃的分片下载数
     public getActiveDownloadsCount(): number {
         return this.xhrRequests.size;
     }
 
+    // 清除所有的XHR请求
     public destroy(): void {
         this.xhrRequests.forEach((request) => request.xhr.abort());
         this.xhrRequests.clear();
     }
 
+    // 设置xhr事件监听
     private setupXhrEvents(
         xhr: XMLHttpRequest,
         segment: Segment,
@@ -137,20 +146,7 @@ export class HttpMediaManager extends STEEmitter<
         xhr.addEventListener("load", async (event: any) => {
             // 处理错误情况
             if (event.target.status < 200 || event.target.status >= 300) {
-                // this.segmentFailure(segment, event, xhr);
-                // 返回响应的序列化URL
-                segment.responseUrl =
-                    xhr.responseURL === null ? undefined : xhr.responseURL;
-
-                // 将该片段请求在请求列表中删除，然后将该片段id假如到失败片段列表中
-                this.xhrRequests.delete(segment.id);
-                this.failedSegments.set(
-                    segment.id,
-                    this.now() + this.settings.httpFailedSegmentTimeout
-                );
-                // 对外暴露错误
-                this.emit("segment-error", segment, event);
-                return;
+                this.segmentFailure(segment, event, xhr);
             }
 
             // 请求成功时获取数据
@@ -180,26 +176,27 @@ export class HttpMediaManager extends STEEmitter<
                 data = segmentData.buffer;
             }
 
-            await this.segmentDownloadFinished(segment, data, xhr);
+            await this.segmentValidate(segment, data, xhr);
         });
 
+        // 处理异常状态
         xhr.addEventListener("error", (event: any) => {
             this.segmentFailure(segment, event, xhr);
         });
-
         xhr.addEventListener("timeout", (event: any) => {
             this.segmentFailure(segment, event, xhr);
         });
     }
 
-    private async segmentDownloadFinished(
+    // 分片数据校验
+    private async segmentValidate(
         segment: Segment,
         data: ArrayBuffer,
         xhr: XMLHttpRequest
     ) {
         segment.responseUrl =
             xhr.responseURL === null ? undefined : xhr.responseURL;
-
+        // 如果有传入分片校验器
         if (this.settings.segmentValidator) {
             try {
                 await this.settings.segmentValidator(
@@ -216,18 +213,22 @@ export class HttpMediaManager extends STEEmitter<
         this.emit("segment-loaded", segment, data);
     }
 
+    // 设置xhr事件监听
     private segmentFailure(segment: Segment, error: any, xhr: XMLHttpRequest) {
+        // 返回响应的序列化URL
         segment.responseUrl =
             xhr.responseURL === null ? undefined : xhr.responseURL;
-
+        // 将该分片请求在请求列表中删除，然后将该分片id加入到失败分片列表中
         this.xhrRequests.delete(segment.id);
         this.failedSegments.set(
             segment.id,
             this.now() + this.settings.httpFailedSegmentTimeout
         );
+        // 对外暴露错误
         this.emit("segment-error", segment, error);
     }
 
+    // 清除失败的分片
     private cleanTimedOutFailedSegments() {
         const now = this.now();
         const candidates: string[] = [];
@@ -241,5 +242,6 @@ export class HttpMediaManager extends STEEmitter<
         candidates.forEach((id) => this.failedSegments.delete(id));
     }
 
+    // 获取当前时间
     private now = () => performance.now();
 }
