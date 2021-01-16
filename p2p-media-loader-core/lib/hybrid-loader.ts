@@ -1,21 +1,3 @@
-/**
- * Copyright 2018 Novage LLC.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-import * as Debug from "debug";
-
 import { LoaderInterface, Events, Segment } from "./loader-interface";
 import { EventEmitter } from "events";
 import { HttpMediaManager } from "./http-media-manager";
@@ -28,51 +10,78 @@ import * as getBrowserRTC from "get-browser-rtc";
 import * as Peer from "simple-peer";
 
 const defaultSettings: HybridLoaderSettings = {
+    // 缓存分片过期时间
     cachedSegmentExpiration: 5 * 60 * 1000,
+    // 缓存分片总数
     cachedSegmentsCount: 30,
 
+    // 使用p2p传输
     useP2P: true,
+
+    // 只下载不上传
     consumeOnly: false,
 
+    // 所需分片优先级
     requiredSegmentsPriority: 1,
 
+    // http下载并发数
     simultaneousHttpDownloads: 2,
+    // 通过http下载分片概率
     httpDownloadProbability: 0.1,
+    // httpDownloadProbability 检查间隔
     httpDownloadProbabilityInterval: 1000,
+    // 没有对等方时，是否通过http随机下载分片
     httpDownloadProbabilitySkipIfNoPeers: false,
+    // http分片下载超时毫秒数
     httpFailedSegmentTimeout: 10000,
+
+    // 高于此优先级的分片不会通过 http 下载
     httpDownloadMaxPriority: 20,
+
+    // 该三项不考虑
     httpDownloadInitialTimeout: 0,
     httpDownloadInitialTimeoutPerSegment: 4000,
     httpUseRanges: false,
 
+    // p2p下载并发数
     simultaneousP2PDownloads: 3,
+    // 高于此优先级的分片不会通过 p2p 下载
     p2pDownloadMaxPriority: 20,
+    // p2p分片下载超时毫秒数
     p2pSegmentDownloadTimeout: 60000,
 
+    // webrtc消息最大字节数
     webRtcMaxMessageSize: 64 * 1024 - 1,
-    trackerAnnounce: ["wss://tracker.novage.com.ua", "wss://tracker.openwebtorrent.com"],
+    // tracker 服务器
+    trackerAnnounce: [
+        "wss://tracker.novage.com.ua",
+        "wss://tracker.openwebtorrent.com",
+    ],
+    // 每个tracker服务器的最大连接数
     peerRequestsPerAnnounce: 10,
-    rtcConfig: (Peer as any).config
+    rtcConfig: (Peer as any).config,
 };
 
 export class HybridLoader extends EventEmitter implements LoaderInterface {
-
-    private readonly debug = Debug("p2pml:hybrid-loader");
-    private readonly debugSegments = Debug("p2pml:hybrid-loader-segments");
     private readonly httpManager: HttpMediaManager;
     private readonly p2pManager: P2PMediaManager;
     private segmentsStorage: SegmentsStorage;
     private segmentsQueue: Segment[] = [];
     private readonly bandwidthApproximator = new BandwidthApproximator();
     private readonly settings: HybridLoaderSettings;
-    private httpRandomDownloadInterval: ReturnType<typeof setInterval> | undefined;
+    private httpRandomDownloadInterval:
+        | ReturnType<typeof setInterval>
+        | undefined;
     private httpDownloadInitialTimeoutTimestamp = -Infinity;
     private masterSwarmId?: string;
 
     public static isSupported(): boolean {
         const browserRtc = (getBrowserRTC as Function)();
-        return (browserRtc && (browserRtc.RTCPeerConnection.prototype.createDataChannel !== undefined));
+        return (
+            browserRtc &&
+            browserRtc.RTCPeerConnection.prototype.createDataChannel !==
+                undefined
+        );
     }
 
     public constructor(settings: Partial<HybridLoaderSettings> = {}) {
@@ -80,28 +89,18 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
 
         this.settings = { ...defaultSettings, ...settings };
 
-        if ((settings as any).bufferedSegmentsCount) {
-            if (settings.p2pDownloadMaxPriority === undefined) {
-                this.settings.p2pDownloadMaxPriority = (settings as any).bufferedSegmentsCount;
-            }
-
-            if (settings.httpDownloadMaxPriority === undefined) {
-                this.settings.p2pDownloadMaxPriority = (settings as any).bufferedSegmentsCount;
-            }
-
-            delete (this.settings as any).bufferedSegmentsCount;
-        }
-
-        this.segmentsStorage = (this.settings.segmentsStorage === undefined
-            ? new SegmentsMemoryStorage(this.settings)
-            : this.settings.segmentsStorage);
-
-        this.debug("loader settings", this.settings);
+        // 实例化存储对象
+        this.segmentsStorage =
+            this.settings.segmentsStorage === undefined
+                ? new SegmentsMemoryStorage(this.settings)
+                : this.settings.segmentsStorage;
 
         this.httpManager = this.createHttpManager();
         this.httpManager.on("segment-loaded", this.onSegmentLoaded);
         this.httpManager.on("segment-error", this.onSegmentError);
-        this.httpManager.on("bytes-downloaded", (bytes: number) => this.onPieceBytesDownloaded("http", bytes));
+        this.httpManager.on("bytes-downloaded", (bytes: number) =>
+            this.onPieceBytesDownloaded("http", bytes)
+        );
 
         this.p2pManager = this.createP2PManager();
         this.p2pManager.on("segment-loaded", this.onSegmentLoaded);
@@ -111,13 +110,26 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
                 return;
             }
 
-            const storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
-            if (this.processSegmentsQueue(storageSegments) && !this.settings.consumeOnly) {
-                this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
+            const storageSegments = await this.segmentsStorage.getSegmentsMap(
+                this.masterSwarmId
+            );
+            if (
+                this.processSegmentsQueue(storageSegments) &&
+                !this.settings.consumeOnly
+            ) {
+                this.p2pManager.sendSegmentsMapToAll(
+                    this.createSegmentsMap(storageSegments)
+                );
             }
         });
-        this.p2pManager.on("bytes-downloaded", (bytes: number, peerId: string) => this.onPieceBytesDownloaded("p2p", bytes, peerId));
-        this.p2pManager.on("bytes-uploaded", (bytes: number, peerId: string) => this.onPieceBytesUploaded("p2p", bytes, peerId));
+        this.p2pManager.on(
+            "bytes-downloaded",
+            (bytes: number, peerId: string) =>
+                this.onPieceBytesDownloaded("p2p", bytes, peerId)
+        );
+        this.p2pManager.on("bytes-uploaded", (bytes: number, peerId: string) =>
+            this.onPieceBytesUploaded("p2p", bytes, peerId)
+        );
         this.p2pManager.on("peer-connected", this.onPeerConnect);
         this.p2pManager.on("peer-closed", this.onPeerClose);
         this.p2pManager.on("tracker-update", this.onTrackerUpdate);
@@ -132,14 +144,24 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
     }
 
     public async load(segments: Segment[], streamSwarmId: string) {
-        if (this.httpRandomDownloadInterval === undefined) { // Do once on first call
-            this.httpRandomDownloadInterval = setInterval(this.downloadRandomSegmentOverHttp, this.settings.httpDownloadProbabilityInterval);
+        if (this.httpRandomDownloadInterval === undefined) {
+            // Do once on first call
+            this.httpRandomDownloadInterval = setInterval(
+                this.downloadRandomSegmentOverHttp,
+                this.settings.httpDownloadProbabilityInterval
+            );
 
-            if (this.settings.httpDownloadInitialTimeout > 0 && this.settings.httpDownloadInitialTimeoutPerSegment > 0) {
+            if (
+                this.settings.httpDownloadInitialTimeout > 0 &&
+                this.settings.httpDownloadInitialTimeoutPerSegment > 0
+            ) {
                 // Initialize initial HTTP download timeout (i.e. download initial segments over P2P)
-                this.debugSegments("enable initial HTTP download timeout", this.settings.httpDownloadInitialTimeout, "per segment", this.settings.httpDownloadInitialTimeoutPerSegment);
+
                 this.httpDownloadInitialTimeoutTimestamp = this.now();
-                setTimeout(this.processInitialSegmentTimeout, this.settings.httpDownloadInitialTimeoutPerSegment + 100);
+                setTimeout(
+                    this.processInitialSegmentTimeout,
+                    this.settings.httpDownloadInitialTimeoutPerSegment + 100
+                );
             }
         }
 
@@ -151,14 +173,11 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
             this.p2pManager.setStreamSwarmId(streamSwarmId, this.masterSwarmId);
         }
 
-        this.debug("load segments");
-
         let updateSegmentsMap = false;
 
         // stop all http requests and p2p downloads for segments that are not in the new load
         for (const segment of this.segmentsQueue) {
-            if (!segments.find(f => f.url == segment.url)) {
-                this.debug("remove segment", segment.url);
+            if (!segments.find((f) => f.url == segment.url)) {
                 if (this.httpManager.isDownloading(segment)) {
                     updateSegmentsMap = true;
                     this.httpManager.abort(segment);
@@ -169,30 +188,29 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
             }
         }
 
-        if (this.debug.enabled) {
-            for (const segment of segments) {
-                if (!this.segmentsQueue.find(f => f.url == segment.url)) {
-                    this.debug("add segment", segment.url);
-                }
-            }
-        }
-
         this.segmentsQueue = segments;
 
         if (this.masterSwarmId === undefined) {
             return;
         }
 
-        let storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
-        updateSegmentsMap = (this.processSegmentsQueue(storageSegments) || updateSegmentsMap);
+        let storageSegments = await this.segmentsStorage.getSegmentsMap(
+            this.masterSwarmId
+        );
+        updateSegmentsMap =
+            this.processSegmentsQueue(storageSegments) || updateSegmentsMap;
 
         if (await this.cleanSegmentsStorage()) {
-            storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
+            storageSegments = await this.segmentsStorage.getSegmentsMap(
+                this.masterSwarmId
+            );
             updateSegmentsMap = true;
         }
 
         if (updateSegmentsMap && !this.settings.consumeOnly) {
-            this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
+            this.p2pManager.sendSegmentsMapToAll(
+                this.createSegmentsMap(storageSegments)
+            );
         }
     }
 
@@ -208,7 +226,7 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
 
     public getDetails() {
         return {
-            peerId: this.p2pManager.getPeerId()
+            peerId: this.p2pManager.getPeerId(),
         };
     }
 
@@ -233,24 +251,36 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
         }
 
         if (this.masterSwarmId !== undefined) {
-            const storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
+            const storageSegments = await this.segmentsStorage.getSegmentsMap(
+                this.masterSwarmId
+            );
 
-            if (this.processSegmentsQueue(storageSegments) && !this.settings.consumeOnly) {
-                this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
+            if (
+                this.processSegmentsQueue(storageSegments) &&
+                !this.settings.consumeOnly
+            ) {
+                this.p2pManager.sendSegmentsMapToAll(
+                    this.createSegmentsMap(storageSegments)
+                );
             }
         }
 
         if (this.httpDownloadInitialTimeoutTimestamp !== -Infinity) {
             // Set one more timeout for a next segment
-            setTimeout(this.processInitialSegmentTimeout, this.settings.httpDownloadInitialTimeoutPerSegment);
+            setTimeout(
+                this.processInitialSegmentTimeout,
+                this.settings.httpDownloadInitialTimeoutPerSegment
+            );
         }
-    }
+    };
 
-    private processSegmentsQueue(storageSegments: Map<string, {segment: Segment}>) {
-        this.debugSegments("process segments queue. priority",
-                this.segmentsQueue.length > 0 ? this.segmentsQueue[0].priority : 0);
-
-        if (this.masterSwarmId === undefined || this.segmentsQueue.length === 0) {
+    private processSegmentsQueue(
+        storageSegments: Map<string, { segment: Segment }>
+    ) {
+        if (
+            this.masterSwarmId === undefined ||
+            this.segmentsQueue.length === 0
+        ) {
             return false;
         }
 
@@ -269,12 +299,16 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
                 }
             }
 
-            const httpTimeout = this.now() - this.httpDownloadInitialTimeoutTimestamp;
-            httpAllowed = (httpTimeout >= this.settings.httpDownloadInitialTimeout)
-                    || ((firstNotDownloadePriority !== undefined) && (httpTimeout > this.settings.httpDownloadInitialTimeoutPerSegment) && (firstNotDownloadePriority <= 0));
+            const httpTimeout =
+                this.now() - this.httpDownloadInitialTimeoutTimestamp;
+            httpAllowed =
+                httpTimeout >= this.settings.httpDownloadInitialTimeout ||
+                (firstNotDownloadePriority !== undefined &&
+                    httpTimeout >
+                        this.settings.httpDownloadInitialTimeoutPerSegment &&
+                    firstNotDownloadePriority <= 0);
 
             if (httpAllowed) {
-                this.debugSegments("cancel initial HTTP download timeout - timed out");
                 this.httpDownloadInitialTimeoutTimestamp = -Infinity;
             }
         }
@@ -282,29 +316,44 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
         for (let index = 0; index < this.segmentsQueue.length; index++) {
             const segment = this.segmentsQueue[index];
 
-            if (storageSegments.has(segment.id) || this.httpManager.isDownloading(segment)) {
+            if (
+                storageSegments.has(segment.id) ||
+                this.httpManager.isDownloading(segment)
+            ) {
                 continue;
             }
 
-            if (segment.priority <= this.settings.requiredSegmentsPriority && httpAllowed && !this.httpManager.isFailed(segment)) {
+            if (
+                segment.priority <= this.settings.requiredSegmentsPriority &&
+                httpAllowed &&
+                !this.httpManager.isFailed(segment)
+            ) {
                 // Download required segments over HTTP
-                if (this.httpManager.getActiveDownloadsCount() >= this.settings.simultaneousHttpDownloads) {
+                if (
+                    this.httpManager.getActiveDownloadsCount() >=
+                    this.settings.simultaneousHttpDownloads
+                ) {
                     // Not enough HTTP download resources. Abort one of the HTTP downloads.
-                    for (let i = this.segmentsQueue.length - 1; i > index; i--) {
+                    for (
+                        let i = this.segmentsQueue.length - 1;
+                        i > index;
+                        i--
+                    ) {
                         const segmentToAbort = this.segmentsQueue[i];
                         if (this.httpManager.isDownloading(segmentToAbort)) {
-                            this.debugSegments("cancel HTTP download", segmentToAbort.priority, segmentToAbort.url);
                             this.httpManager.abort(segmentToAbort);
                             break;
                         }
                     }
                 }
 
-                if (this.httpManager.getActiveDownloadsCount() < this.settings.simultaneousHttpDownloads) {
+                if (
+                    this.httpManager.getActiveDownloadsCount() <
+                    this.settings.simultaneousHttpDownloads
+                ) {
                     // Abort P2P download of the required segment if any and force HTTP download
                     const downloadedPieces = this.p2pManager.abort(segment);
                     this.httpManager.download(segment, downloadedPieces);
-                    this.debugSegments("HTTP download (priority)", segment.priority, segment.url);
                     updateSegmentsMap = true;
                     continue;
                 }
@@ -314,28 +363,42 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
                 continue;
             }
 
-            if (segment.priority <= this.settings.requiredSegmentsPriority) { // Download required segments over P2P
-                segmentsMap = segmentsMap ? segmentsMap : this.p2pManager.getOvrallSegmentsMap();
+            if (segment.priority <= this.settings.requiredSegmentsPriority) {
+                // Download required segments over P2P
+                segmentsMap = segmentsMap
+                    ? segmentsMap
+                    : this.p2pManager.getOvrallSegmentsMap();
 
-                if (segmentsMap.get(segment.id) !== MediaPeerSegmentStatus.Loaded) {
+                if (
+                    segmentsMap.get(segment.id) !==
+                    MediaPeerSegmentStatus.Loaded
+                ) {
                     continue;
                 }
 
-                if (this.p2pManager.getActiveDownloadsCount() >= this.settings.simultaneousP2PDownloads) {
+                if (
+                    this.p2pManager.getActiveDownloadsCount() >=
+                    this.settings.simultaneousP2PDownloads
+                ) {
                     // Not enough P2P download resources. Abort one of the P2P downloads.
-                    for (let i = this.segmentsQueue.length - 1; i > index; i--) {
+                    for (
+                        let i = this.segmentsQueue.length - 1;
+                        i > index;
+                        i--
+                    ) {
                         const segmentToAbort = this.segmentsQueue[i];
                         if (this.p2pManager.isDownloading(segmentToAbort)) {
-                            this.debugSegments("cancel P2P download", segmentToAbort.priority, segmentToAbort.url);
                             this.p2pManager.abort(segmentToAbort);
                             break;
                         }
                     }
                 }
 
-                if (this.p2pManager.getActiveDownloadsCount() < this.settings.simultaneousP2PDownloads) {
+                if (
+                    this.p2pManager.getActiveDownloadsCount() <
+                    this.settings.simultaneousP2PDownloads
+                ) {
                     if (this.p2pManager.download(segment)) {
-                        this.debugSegments("P2P download (priority)", segment.priority, segment.url);
                         continue;
                     }
                 }
@@ -343,10 +406,12 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
                 continue;
             }
 
-            if (this.p2pManager.getActiveDownloadsCount() < this.settings.simultaneousP2PDownloads &&
-                    segment.priority <= this.settings.p2pDownloadMaxPriority) {
+            if (
+                this.p2pManager.getActiveDownloadsCount() <
+                    this.settings.simultaneousP2PDownloads &&
+                segment.priority <= this.settings.p2pDownloadMaxPriority
+            ) {
                 if (this.p2pManager.download(segment)) {
-                    this.debugSegments("P2P download", segment.priority, segment.url);
                 }
             }
         }
@@ -355,90 +420,140 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
     }
 
     private downloadRandomSegmentOverHttp = async () => {
-        if (this.masterSwarmId === undefined ||
-                this.httpRandomDownloadInterval === undefined ||
-                this.httpDownloadInitialTimeoutTimestamp !== -Infinity ||
-                this.httpManager.getActiveDownloadsCount() >= this.settings.simultaneousHttpDownloads ||
-                (this.settings.httpDownloadProbabilitySkipIfNoPeers && this.p2pManager.getPeers().size === 0) ||
-                this.settings.consumeOnly) {
+        if (
+            this.masterSwarmId === undefined ||
+            this.httpRandomDownloadInterval === undefined ||
+            this.httpDownloadInitialTimeoutTimestamp !== -Infinity ||
+            this.httpManager.getActiveDownloadsCount() >=
+                this.settings.simultaneousHttpDownloads ||
+            (this.settings.httpDownloadProbabilitySkipIfNoPeers &&
+                this.p2pManager.getPeers().size === 0) ||
+            this.settings.consumeOnly
+        ) {
             return;
         }
 
-        const storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
+        const storageSegments = await this.segmentsStorage.getSegmentsMap(
+            this.masterSwarmId
+        );
         const segmentsMap = this.p2pManager.getOvrallSegmentsMap();
 
-        const pendingQueue = this.segmentsQueue.filter(s =>
-            !this.p2pManager.isDownloading(s) &&
-            !this.httpManager.isDownloading(s) &&
-            !segmentsMap.has(s.id) &&
-            !this.httpManager.isFailed(s) &&
-            (s.priority <= this.settings.httpDownloadMaxPriority) &&
-            !storageSegments.has(s.id));
+        const pendingQueue = this.segmentsQueue.filter(
+            (s) =>
+                !this.p2pManager.isDownloading(s) &&
+                !this.httpManager.isDownloading(s) &&
+                !segmentsMap.has(s.id) &&
+                !this.httpManager.isFailed(s) &&
+                s.priority <= this.settings.httpDownloadMaxPriority &&
+                !storageSegments.has(s.id)
+        );
 
         if (pendingQueue.length == 0) {
             return;
         }
 
-        if (Math.random() > this.settings.httpDownloadProbability * pendingQueue.length) {
+        if (
+            Math.random() >
+            this.settings.httpDownloadProbability * pendingQueue.length
+        ) {
             return;
         }
 
-        const segment = pendingQueue[Math.floor(Math.random() * pendingQueue.length)];
-        this.debugSegments("HTTP download (random)", segment.priority, segment.url);
+        const segment =
+            pendingQueue[Math.floor(Math.random() * pendingQueue.length)];
         this.httpManager.download(segment);
-        this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
-    }
+        this.p2pManager.sendSegmentsMapToAll(
+            this.createSegmentsMap(storageSegments)
+        );
+    };
 
-    private onPieceBytesDownloaded = (method: "http" | "p2p", bytes: number, peerId?: string) => {
+    // 分片下载回调
+    private onPieceBytesDownloaded = (
+        method: "http" | "p2p",
+        bytes: number,
+        peerId?: string
+    ) => {
+        // 向下载计算实例添加数据，用于测量下载速度
         this.bandwidthApproximator.addBytes(bytes, this.now());
-        this.emit(Events.PieceBytesDownloaded, method, bytes, peerId);
-    }
 
-    private onPieceBytesUploaded = (method: "p2p", bytes: number, peerId?: string) => {
+        // this.emit(Events.PieceBytesDownloaded, method, bytes, peerId);
+    };
+
+    private onPieceBytesUploaded = (
+        method: "p2p",
+        bytes: number,
+        peerId?: string
+    ) => {
         this.emit(Events.PieceBytesUploaded, method, bytes, peerId);
-    }
+    };
 
-    private onSegmentLoaded = async (segment: Segment, data: ArrayBuffer, peerId?: string) => {
-        this.debugSegments("segment loaded", segment.id, segment.url);
-
+    private onSegmentLoaded = async (
+        segment: Segment,
+        data: ArrayBuffer,
+        peerId?: string
+    ) => {
         if (this.masterSwarmId === undefined) {
             return;
         }
 
         segment.data = data;
-        segment.downloadBandwidth = this.bandwidthApproximator.getBandwidth(this.now());
+        segment.downloadBandwidth = this.bandwidthApproximator.getBandwidth(
+            this.now()
+        );
 
         await this.segmentsStorage.storeSegment(segment);
         this.emit(Events.SegmentLoaded, segment, peerId);
 
-        let storageSegments: Map<string, {segment: Segment}> | undefined;
+        let storageSegments: Map<string, { segment: Segment }> | undefined;
 
-        storageSegments = (storageSegments === undefined ? await this.segmentsStorage.getSegmentsMap(this.masterSwarmId) : storageSegments);
+        storageSegments =
+            storageSegments === undefined
+                ? await this.segmentsStorage.getSegmentsMap(this.masterSwarmId)
+                : storageSegments;
         this.processSegmentsQueue(storageSegments);
         if (!this.settings.consumeOnly) {
-            this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
+            this.p2pManager.sendSegmentsMapToAll(
+                this.createSegmentsMap(storageSegments)
+            );
         }
-    }
+    };
 
-    private onSegmentError = async (segment: Segment, details: any, peerId?: string) => {
-        this.debugSegments("segment error", segment.id, segment.url, peerId, details);
+    private onSegmentError = async (
+        segment: Segment,
+        details: any,
+        peerId?: string
+    ) => {
         this.emit(Events.SegmentError, segment, details, peerId);
         if (this.masterSwarmId !== undefined) {
-            const storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
-            if (this.processSegmentsQueue(storageSegments) && !this.settings.consumeOnly) {
-                this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
+            const storageSegments = await this.segmentsStorage.getSegmentsMap(
+                this.masterSwarmId
+            );
+            if (
+                this.processSegmentsQueue(storageSegments) &&
+                !this.settings.consumeOnly
+            ) {
+                this.p2pManager.sendSegmentsMapToAll(
+                    this.createSegmentsMap(storageSegments)
+                );
             }
         }
-    }
+    };
 
     private getStreamSwarmId(segment: Segment) {
-        return segment.streamId === undefined ? segment.masterSwarmId : `${segment.masterSwarmId}+${segment.streamId}`;
+        return segment.streamId === undefined
+            ? segment.masterSwarmId
+            : `${segment.masterSwarmId}+${segment.streamId}`;
     }
 
-    private createSegmentsMap(storageSegments: Map<string, {segment: Segment}>) {
-        const segmentsMap: {[key: string]: [string, number[]]} = {};
+    private createSegmentsMap(
+        storageSegments: Map<string, { segment: Segment }>
+    ) {
+        const segmentsMap: { [key: string]: [string, number[]] } = {};
 
-        const addSegmentToMap = (segment: Segment, status: MediaPeerSegmentStatus) => {
+        const addSegmentToMap = (
+            segment: Segment,
+            status: MediaPeerSegmentStatus
+        ) => {
             const streamSwarmId = this.getStreamSwarmId(segment);
             const segmentId = segment.sequence;
 
@@ -448,74 +563,108 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
                 segmentsMap[streamSwarmId] = segmentsIdsAndStatuses;
             }
             const segmentsStatuses = segmentsIdsAndStatuses[1];
-            segmentsIdsAndStatuses[0] += ((segmentsStatuses.length == 0) ? segmentId : `|${segmentId}`);
+            segmentsIdsAndStatuses[0] +=
+                segmentsStatuses.length == 0 ? segmentId : `|${segmentId}`;
             segmentsStatuses.push(status);
         };
 
         for (const storageSegment of storageSegments.values()) {
-            addSegmentToMap(storageSegment.segment, MediaPeerSegmentStatus.Loaded);
+            addSegmentToMap(
+                storageSegment.segment,
+                MediaPeerSegmentStatus.Loaded
+            );
         }
 
         for (const download of this.httpManager.getActiveDownloads().values()) {
-            addSegmentToMap(download.segment, MediaPeerSegmentStatus.LoadingByHttp);
+            addSegmentToMap(
+                download.segment,
+                MediaPeerSegmentStatus.LoadingByHttp
+            );
         }
 
         return segmentsMap;
     }
 
-    private onPeerConnect = async (peer: {id: string}) => {
+    private onPeerConnect = async (peer: { id: string }) => {
         this.emit(Events.PeerConnect, peer);
         if (!this.settings.consumeOnly && this.masterSwarmId !== undefined) {
-            this.p2pManager.sendSegmentsMap(peer.id, this.createSegmentsMap(await this.segmentsStorage.getSegmentsMap(this.masterSwarmId)));
+            this.p2pManager.sendSegmentsMap(
+                peer.id,
+                this.createSegmentsMap(
+                    await this.segmentsStorage.getSegmentsMap(
+                        this.masterSwarmId
+                    )
+                )
+            );
         }
-    }
+    };
 
     private onPeerClose = (peerId: string) => {
         this.emit(Events.PeerClose, peerId);
-    }
+    };
 
     private onTrackerUpdate = async (data: { incomplete?: number }) => {
-        if (this.httpDownloadInitialTimeoutTimestamp !== -Infinity &&
-                data.incomplete !== undefined && data.incomplete <= 1) {
-
-            this.debugSegments("cancel initial HTTP download timeout - no peers");
-
+        if (
+            this.httpDownloadInitialTimeoutTimestamp !== -Infinity &&
+            data.incomplete !== undefined &&
+            data.incomplete <= 1
+        ) {
             this.httpDownloadInitialTimeoutTimestamp = -Infinity;
 
             if (this.masterSwarmId !== undefined) {
-                const storageSegments = await this.segmentsStorage.getSegmentsMap(this.masterSwarmId);
+                const storageSegments = await this.segmentsStorage.getSegmentsMap(
+                    this.masterSwarmId
+                );
 
-                if (this.processSegmentsQueue(storageSegments) && !this.settings.consumeOnly) {
-                    this.p2pManager.sendSegmentsMapToAll(this.createSegmentsMap(storageSegments));
+                if (
+                    this.processSegmentsQueue(storageSegments) &&
+                    !this.settings.consumeOnly
+                ) {
+                    this.p2pManager.sendSegmentsMapToAll(
+                        this.createSegmentsMap(storageSegments)
+                    );
                 }
             }
         }
-    }
+    };
 
     private async cleanSegmentsStorage(): Promise<boolean> {
         if (this.masterSwarmId === undefined) {
             return false;
         }
 
-        return this.segmentsStorage.clean(this.masterSwarmId,
-            (id: string) => this.segmentsQueue.find(queueSegment => queueSegment.id === id) !== undefined);
+        return this.segmentsStorage.clean(
+            this.masterSwarmId,
+            (id: string) =>
+                this.segmentsQueue.find(
+                    (queueSegment) => queueSegment.id === id
+                ) !== undefined
+        );
     }
 
     private now() {
         return performance.now();
     }
-
 }
 
 export interface SegmentsStorage {
     storeSegment(segment: Segment): Promise<void>;
-    getSegmentsMap(masterSwarmId: string): Promise<Map<string, {segment: Segment}>>;
+    getSegmentsMap(
+        masterSwarmId: string
+    ): Promise<Map<string, { segment: Segment }>>;
     getSegment(id: string, masterSwarmId: string): Promise<Segment | undefined>;
-    clean(masterSwarmId: string, lockedSementsfilter?: (id: string) => boolean): Promise<boolean>;
+    clean(
+        masterSwarmId: string,
+        lockedSementsfilter?: (id: string) => boolean
+    ): Promise<boolean>;
     destroy(): Promise<void>;
 }
 
-export type SegmentValidatorCallback = (segment: Segment, method: "http" | "p2p", peerId?: string) => Promise<void>;
+export type SegmentValidatorCallback = (
+    segment: Segment,
+    method: "http" | "p2p",
+    peerId?: string
+) => Promise<void>;
 export type XhrSetupCallback = (xhr: XMLHttpRequest, url: string) => void;
 export type SegmentUrlBuilder = (segment: Segment) => string;
 
