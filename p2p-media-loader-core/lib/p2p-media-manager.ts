@@ -17,48 +17,6 @@ class PeerSegmentRequest {
     constructor(readonly peerId: string, readonly segment: Segment) {}
 }
 
-class PromiseA {
-    status = "pending";
-    reason = undefined;
-    value = undefined;
-
-    constructor(fn) {
-        const resolve = (value) => {
-            if (this.status === "pending") {
-                this.status = "fulfilled";
-                this.value = value;
-            }
-        };
-        const reject = (err) => {
-            if (this.status === "pending") {
-                this.status = "rejected";
-                this.reason = err;
-            }
-        };
-
-        try {
-            fn(resolve, reject);
-        } catch (err) {
-            reject(err);
-        }
-    }
-
-    // 创建 then 方法
-    then(onFulfilled, onRejected) {
-        // onFulfilled 和 onRejected 是可选参数
-        onFulfilled =
-            typeof onFulfilled === "function" ? onFulfilled : function (v) {};
-        onRejected =
-            typeof onRejected === "function" ? onRejected : function (err) {};
-        if (this.status === "fulfilled") {
-            onFulfilled(this.value);
-        }
-        if (this.status === "rejected") {
-            onRejected(this.reason);
-        }
-    }
-}
-
 // 生成 peer id buffer
 function generatePeerId(): ArrayBuffer {
     const PEER_ID_SYMBOLS =
@@ -102,11 +60,17 @@ export class P2PMediaManager extends STEEmitter<
         private sementsStorage: SegmentsStorage,
         private settings: {
             useP2P: boolean;
+            // web torrent 跟踪器列表
             trackerAnnounce: string[];
+            // 从开始到使用P2P下载的时间间隔
             p2pSegmentDownloadTimeout: number;
+            // 分片验证器
             segmentValidator?: SegmentValidatorCallback;
+            // webrtc最大消息大小
             webRtcMaxMessageSize: number;
+            // rtc配置
             rtcConfig?: RTCConfiguration;
+            // 每个跟踪器可请求的peer的数量
             peerRequestsPerAnnounce: number;
         }
     ) {
@@ -162,6 +126,7 @@ export class P2PMediaManager extends STEEmitter<
         }
     }
 
+    // 创建bitTorrent跟踪器
     private createClient(infoHash: ArrayBuffer): void {
         if (!this.settings.useP2P) return;
 
