@@ -165,18 +165,18 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
             }
         }
 
-        if (segments.length > 0) {
-            this.masterSwarmId = segments[0].masterSwarmId;
-        }
+        // 每一组的分片的masterSwarmId都是一致的，只需要取第一个即可
+        if (segments.length > 0) this.masterSwarmId = segments[0].masterSwarmId;
 
-        if (this.masterSwarmId !== undefined) {
+        // 存在 master id时才启用p2p
+        if (this.masterSwarmId !== undefined)
             this.p2pManager.setStreamSwarmId(streamSwarmId, this.masterSwarmId);
-        }
 
         let updateSegmentsMap = false;
 
-        // stop all http requests and p2p downloads for segments that are not in the new load
+        // 加载新数据之前停止之前所有的http和p2p请求
         for (const segment of this.segmentsQueue) {
+            // 比较当前分片数组和之前的分片队列，暂停请求url不相同的分片
             if (!segments.find((f) => f.url == segment.url)) {
                 if (this.httpManager.isDownloading(segment)) {
                     updateSegmentsMap = true;
@@ -190,16 +190,16 @@ export class HybridLoader extends EventEmitter implements LoaderInterface {
 
         this.segmentsQueue = segments;
 
-        if (this.masterSwarmId === undefined) {
-            return;
-        }
+        if (this.masterSwarmId === undefined) return;
 
+        // 获取缓存中对应的分片数据
         let storageSegments = await this.segmentsStorage.getSegmentsMap(
             this.masterSwarmId
         );
         updateSegmentsMap =
             this.processSegmentsQueue(storageSegments) || updateSegmentsMap;
 
+        // 清除缓存
         if (await this.cleanSegmentsStorage()) {
             storageSegments = await this.segmentsStorage.getSegmentsMap(
                 this.masterSwarmId

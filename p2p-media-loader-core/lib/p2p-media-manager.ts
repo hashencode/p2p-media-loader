@@ -95,6 +95,7 @@ export class P2PMediaManager extends STEEmitter<
         streamSwarmId: string,
         masterSwarmId: string
     ) {
+        // 防止重复创建相同的Client
         if (this.streamSwarmId === streamSwarmId) return;
 
         this.destroy(true);
@@ -246,17 +247,21 @@ export class P2PMediaManager extends STEEmitter<
     }
 
     public destroy(swarmChange: boolean = false): void {
+        // 重置实例streamSwarmId
         this.streamSwarmId = null;
 
         if (this.trackerClient) {
+            // 如果存在trackerClient则停止
             this.trackerClient.stop();
             if (swarmChange) {
+                // 不销毁trackerClient可以复用websocket连接
                 // Don't destroy trackerClient to reuse its WebSocket connection to the tracker server
                 this.trackerClient.removeAllListeners("error");
                 this.trackerClient.removeAllListeners("warning");
                 this.trackerClient.removeAllListeners("update");
                 this.trackerClient.removeAllListeners("peer");
             } else {
+                // 销毁trackerClient
                 this.trackerClient.destroy();
                 this.trackerClient = null;
             }
@@ -267,11 +272,14 @@ export class P2PMediaManager extends STEEmitter<
             this.pendingTrackerClient = null;
         }
 
+        // 清除所有节点
         this.peers.forEach((peer) => peer.destroy());
         this.peers.clear();
 
+        // 清除所有p2p分片请求
         this.peerSegmentRequests.clear();
 
+        // 清除所有候选节点
         for (const peerCandidateById of this.peerCandidates.values()) {
             for (const peerCandidate of peerCandidateById) {
                 peerCandidate.destroy();
